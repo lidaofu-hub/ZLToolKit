@@ -91,22 +91,26 @@ EventPoller::EventPoller(std::string name) {
 }
 
 void EventPoller::shutdown() {
+    // 首先通过 pipe 投递退出任务，尝试正常唤醒 poller 线程；
+    // 这样 onPipeEvent() 仍有机会被触发，ExitException 也能被正常处理。
+    // First, post the exit task through the pipe to try to wake up the poller
+    // thread normally, so onPipeEvent() still has a chance to be triggered.
+    async_l([]() {
+        throw ExitException();
+    }, false, true);
+
 #if defined(HAS_EPOLL) && defined(_WIN32)
     // Windows 平台使用 wepoll，其 epoll_wait 底层基于 IOCP；
-    // 通过写入 pipe 唤醒的方式不一定能可靠地让 epoll_wait 返回，
-    // 直接关闭 epoll 句柄可以强制 epoll_wait 立即出错返回，
+    // 仅通过写入 pipe 唤醒的方式不一定能可靠地让 epoll_wait 返回，
+    // 因此再关闭 epoll 句柄作为兜底，强制 epoll_wait 立即出错返回，
     // 从而避免 join 轮询线程时卡死。
-    // On Windows, wepoll's epoll_wait is backed by IOCP;
-    // closing the epoll handle forces epoll_wait to return immediately,
-    // preventing the shutdown thread from hanging on join().
+    // On Windows, wepoll's epoll_wait is backed by IOCP; closing the epoll
+    // handle as a fallback forces epoll_wait to return immediately, preventing
+    // the shutdown thread from hanging on join() if the pipe wake-up fails.
     if (_event_fd != INVALID_EVENT_FD) {
         close_event(_event_fd);
         _event_fd = INVALID_EVENT_FD;
     }
-#else
-    async_l([]() {
-        throw ExitException();
-    }, false, true);
 #endif
 
     if (_loop_thread) {
